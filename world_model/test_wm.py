@@ -119,3 +119,21 @@ def test_ema_update():
     for k in before:
         assert torch.allclose(ema.shadow[k], before[k] + 0.5)
     m.load_state_dict(ema.shadow)  # shadow is a loadable state dict
+
+
+from eval import psnr, ssim
+
+
+def test_metrics_identical_images():
+    a = torch.rand(2, 3, 64, 64)
+    assert psnr(a, a).min() > 50
+    assert ssim(a, a).min() > 0.999
+
+
+def test_metrics_degrade_with_noise():
+    torch.manual_seed(0)
+    a = torch.rand(2, 3, 64, 64)
+    b = (a + 0.3 * torch.randn_like(a)).clamp(0, 1)
+    assert psnr(a, b).max() < 25
+    assert ssim(a, b).max() < 0.9
+    assert psnr(a, a).min() > psnr(a, b).max()
