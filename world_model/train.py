@@ -54,43 +54,44 @@ def main():
           f"train examples: {len(ds)}  val episodes: {len(val_eps)}")
 
     def save():
+        tmp = ckpt_path + ".tmp"
         torch.save(
             {"model": model.state_dict(), "ema": ema.shadow,
              "opt": opt.state_dict(), "step": step},
-            ckpt_path,
+            tmp,
         )
+        os.replace(tmp, ckpt_path)
         print(f"saved checkpoint at step {step}")
 
-    loss_f = open(os.path.join(args.out, "loss.csv"), "a", newline="")
-    loss_w = csv.writer(loss_f)
+    with open(os.path.join(args.out, "loss.csv"), "a", newline="") as loss_f:
+        loss_w = csv.writer(loss_f)
 
-    model.train()
-    t0, step0 = time.time(), step
-    while step < args.steps:
-        for ctx, action, target in dl:
-            if step >= args.steps:
-                break
-            ctx = ctx.to(device)
-            action = action.to(device)
-            target = target.to(device)
-            t = torch.randint(0, diff.timesteps, (target.shape[0],), device=device)
-            noise = torch.randn_like(target)
-            x_t = diff.add_noise(target, t, noise)
-            loss = F.mse_loss(model(x_t, ctx, t, action), diff.v_target(target, t, noise))
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            ema.update(model)
-            step += 1
-            if step % args.log_every == 0:
-                rate = (step - step0) / (time.time() - t0)
-                print(f"step {step}/{args.steps}  loss {loss.item():.4f}  {rate:.2f} it/s")
-                loss_w.writerow([step, f"{loss.item():.5f}"])
-                loss_f.flush()
-            if step % args.ckpt_every == 0:
-                save()
-    save()
-    loss_f.close()
+        model.train()
+        t0, step0 = time.time(), step
+        while step < args.steps:
+            for ctx, action, target in dl:
+                if step >= args.steps:
+                    break
+                ctx = ctx.to(device)
+                action = action.to(device)
+                target = target.to(device)
+                t = torch.randint(0, diff.timesteps, (target.shape[0],), device=device)
+                noise = torch.randn_like(target)
+                x_t = diff.add_noise(target, t, noise)
+                loss = F.mse_loss(model(x_t, ctx, t, action), diff.v_target(target, t, noise))
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                ema.update(model)
+                step += 1
+                if step % args.log_every == 0:
+                    rate = (step - step0) / (time.time() - t0)
+                    print(f"step {step}/{args.steps}  loss {loss.item():.4f}  {rate:.2f} it/s")
+                    loss_w.writerow([step, f"{loss.item():.5f}"])
+                    loss_f.flush()
+                if step % args.ckpt_every == 0:
+                    save()
+        save()
 
 
 if __name__ == "__main__":

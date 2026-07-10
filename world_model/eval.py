@@ -1,7 +1,5 @@
 """Evaluate the world model: PSNR/SSIM vs copy-last-frame, sample grid, rollout GIF."""
 import argparse
-import glob
-import math
 import os
 
 import imageio
