@@ -105,3 +105,143 @@ class Diffusion:
             else:
                 x = x0
         return x
+
+
+# --------------------------------------------------------------------------
+# model
+# --------------------------------------------------------------------------
+
+def timestep_embedding(t, dim):
+    half = dim // 2
+    freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=t.device) / half)
+    args = t.float()[:, None] * freqs[None]
+    return torch.cat([args.cos(), args.sin()], dim=-1)
+
+
+class ResBlock(nn.Module):
+    """GroupNorm/SiLU/conv x2 with FiLM (scale-shift) conditioning."""
+
+    def __init__(self, in_ch, out_ch, emb_dim):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(8, in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.emb = nn.Linear(emb_dim, out_ch * 2)
+        self.norm2 = nn.GroupNorm(8, out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, emb):
+        h = self.conv1(F.silu(self.norm1(x)))
+        scale, shift = self.emb(F.silu(emb))[:, :, None, None].chunk(2, dim=1)
+        h = self.norm2(h) * (1 + scale) + shift
+        h = self.conv2(F.silu(h))
+        return h + self.skip(x)
+
+
+class SelfAttention(nn.Module):
+    def __init__(self, ch, heads=4):
+        super().__init__()
+        self.heads = heads
+        self.norm = nn.GroupNorm(8, ch)
+        self.qkv = nn.Conv2d(ch, ch * 3, 1)
+        self.proj = nn.Conv2d(ch, ch, 1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        q, k, v = (
+            self.qkv(self.norm(x))
+            .reshape(B, 3, self.heads, C // self.heads, H * W)
+            .unbind(1)
+        )
+        out = F.scaled_dot_product_attention(
+            q.transpose(-1, -2), k.transpose(-1, -2), v.transpose(-1, -2)
+        )
+        out = out.transpose(-1, -2).reshape(B, C, H, W)
+        return x + self.proj(out)
+
+
+class UNet(nn.Module):
+    """64->32->16 encoder, attention at 16x16 and bottleneck, mirrored decoder.
+    Input: noisy target frame (3ch) + 4 context frames (12ch)."""
+
+    def __init__(self, base=64, emb_dim=256, ctx_ch=3 * (CONTEXT - 1) + 3,
+                 num_actions=NUM_ACTIONS):
+        super().__init__()
+        c1, c2, c3 = base, base * 2, base * 4
+        self.emb_dim = emb_dim
+        self.time_mlp = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim), nn.SiLU(), nn.Linear(emb_dim, emb_dim)
+        )
+        self.action_emb = nn.Embedding(num_actions, emb_dim)
+
+        self.conv_in = nn.Conv2d(3 + ctx_ch, c1, 3, padding=1)
+        self.enc1 = nn.ModuleList([ResBlock(c1, c1, emb_dim), ResBlock(c1, c1, emb_dim)])
+        self.down1 = nn.Conv2d(c1, c1, 3, stride=2, padding=1)   # 64 -> 32
+        self.enc2 = nn.ModuleList([ResBlock(c1, c2, emb_dim), ResBlock(c2, c2, emb_dim)])
+        self.down2 = nn.Conv2d(c2, c2, 3, stride=2, padding=1)   # 32 -> 16
+        self.enc3 = nn.ModuleList([ResBlock(c2, c3, emb_dim), ResBlock(c3, c3, emb_dim)])
+        self.attn3 = SelfAttention(c3)
+
+        self.mid1 = ResBlock(c3, c3, emb_dim)
+        self.mid_attn = SelfAttention(c3)
+        self.mid2 = ResBlock(c3, c3, emb_dim)
+
+        self.dec3 = nn.ModuleList([ResBlock(c3 * 2, c3, emb_dim), ResBlock(c3, c3, emb_dim)])
+        self.attn_d3 = SelfAttention(c3)
+        self.up2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"), nn.Conv2d(c3, c2, 3, padding=1)
+        )
+        self.dec2 = nn.ModuleList([ResBlock(c2 * 2, c2, emb_dim), ResBlock(c2, c2, emb_dim)])
+        self.up1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"), nn.Conv2d(c2, c1, 3, padding=1)
+        )
+        self.dec1 = nn.ModuleList([ResBlock(c1 * 2, c1, emb_dim), ResBlock(c1, c1, emb_dim)])
+        self.out = nn.Sequential(
+            nn.GroupNorm(8, c1), nn.SiLU(), nn.Conv2d(c1, 3, 3, padding=1)
+        )
+
+    def forward(self, x, ctx, t, action):
+        emb = self.time_mlp(timestep_embedding(t, self.emb_dim)) + self.action_emb(action)
+        h = self.conv_in(torch.cat([x, ctx], dim=1))
+        for b in self.enc1:
+            h = b(h, emb)
+        s1 = h
+        h = self.down1(h)
+        for b in self.enc2:
+            h = b(h, emb)
+        s2 = h
+        h = self.down2(h)
+        for b in self.enc3:
+            h = b(h, emb)
+        h = self.attn3(h)
+        s3 = h
+        h = self.mid2(self.mid_attn(self.mid1(h, emb)), emb)
+        h = torch.cat([h, s3], dim=1)
+        for b in self.dec3:
+            h = b(h, emb)
+        h = self.attn_d3(h)
+        h = self.up2(h)
+        h = torch.cat([h, s2], dim=1)
+        for b in self.dec2:
+            h = b(h, emb)
+        h = self.up1(h)
+        h = torch.cat([h, s1], dim=1)
+        for b in self.dec1:
+            h = b(h, emb)
+        return self.out(h)
+
+
+class EMA:
+    """Exponential moving average of a model's state dict."""
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model):
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v, alpha=1 - self.decay)
+            else:
+                self.shadow[k].copy_(v)

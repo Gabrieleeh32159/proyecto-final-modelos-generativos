@@ -77,3 +77,45 @@ def test_ddim_sample_shape_and_range():
     assert out.shape == (2, 3, 64, 64)
     assert torch.isfinite(out).all()
     assert out.min() >= -1.0 and out.max() <= 1.0
+
+
+import torch.nn as nn
+
+from wm import EMA, UNet
+
+
+def test_unet_output_shape_and_size():
+    model = UNet()
+    x = torch.randn(2, 3, 64, 64)
+    ctx = torch.randn(2, 12, 64, 64)
+    t = torch.randint(0, T_TRAIN, (2,))
+    a = torch.randint(0, NUM_ACTIONS, (2,))
+    out = model(x, ctx, t, a)
+    assert out.shape == (2, 3, 64, 64)
+    n_params = sum(p.numel() for p in model.parameters())
+    assert 5e6 < n_params < 30e6
+
+
+def test_unet_action_changes_output():
+    torch.manual_seed(0)
+    model = UNet().eval()
+    x = torch.randn(1, 3, 64, 64)
+    ctx = torch.randn(1, 12, 64, 64)
+    t = torch.tensor([500])
+    with torch.no_grad():
+        out_a = model(x, ctx, t, torch.tensor([1]))
+        out_b = model(x, ctx, t, torch.tensor([7]))
+    assert not torch.allclose(out_a, out_b)
+
+
+def test_ema_update():
+    m = nn.Linear(2, 2)
+    ema = EMA(m, decay=0.5)
+    before = {k: v.clone() for k, v in ema.shadow.items()}
+    with torch.no_grad():
+        for p in m.parameters():
+            p.add_(1.0)
+    ema.update(m)
+    for k in before:
+        assert torch.allclose(ema.shadow[k], before[k] + 0.5)
+    m.load_state_dict(ema.shadow)  # shadow is a loadable state dict
