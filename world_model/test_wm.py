@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from wm import CONTEXT, NUM_ACTIONS, T_TRAIN, TransitionDataset, load_episodes
+from wm import CONTEXT, NUM_ACTIONS, T_TRAIN, TransitionDataset, load_episodes, Diffusion
 
 
 def fake_episode(T=6, seed=0):
@@ -47,3 +47,33 @@ def test_load_episodes_session_split():
     ep = train_eps[0]
     assert ep["obs"].dtype == np.uint8 and ep["obs"].shape[1:] == (64, 64, 3)
     assert len(ep["obs"]) == len(ep["actions"])
+
+
+def test_alpha_bar_schedule():
+    d = Diffusion()
+    ab = d.alpha_bar
+    assert ab.shape == (T_TRAIN,)
+    assert ab[0] > 0.99 and ab[-1] < 0.01          # ~clean start, ~pure noise end
+    assert bool((ab[1:] <= ab[:-1] + 1e-8).all())  # monotone decreasing
+
+
+def test_v_parameterization_roundtrip():
+    d = Diffusion()
+    torch.manual_seed(0)
+    x0 = torch.randn(4, 3, 64, 64).clamp(-1, 1)
+    noise = torch.randn_like(x0)
+    t = torch.tensor([0, 250, 500, 999])
+    x_t = d.add_noise(x0, t, noise)
+    v = d.v_target(x0, t, noise)
+    x0_rec, eps_rec = d.to_x0_eps(x_t, t, v)
+    assert torch.allclose(x0_rec, x0, atol=1e-4)
+    assert torch.allclose(eps_rec, noise, atol=1e-4)
+
+
+def test_ddim_sample_shape_and_range():
+    d = Diffusion()
+    dummy = lambda x, ctx, t, a: torch.zeros_like(x)  # pretend v=0 everywhere
+    out = d.ddim_sample(dummy, torch.zeros(2, 12, 64, 64), torch.zeros(2, dtype=torch.long))
+    assert out.shape == (2, 3, 64, 64)
+    assert torch.isfinite(out).all()
+    assert out.min() >= -1.0 and out.max() <= 1.0

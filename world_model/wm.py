@@ -58,3 +58,50 @@ class TransitionDataset(torch.utils.data.Dataset):
         ctx = torch.cat([norm_frame(ep["obs"][j]) for j in ctx_idx], dim=0)
         target = norm_frame(ep["obs"][t + 1])
         return ctx, torch.tensor(int(ep["actions"][t])), target
+
+
+# --------------------------------------------------------------------------
+# diffusion (cosine schedule, v-prediction, DDIM sampling)
+# --------------------------------------------------------------------------
+
+class Diffusion:
+    def __init__(self, timesteps=T_TRAIN):
+        self.timesteps = timesteps
+        s = 0.008
+        t = torch.arange(timesteps + 1, dtype=torch.float64) / timesteps
+        f = torch.cos((t + s) / (1 + s) * math.pi / 2) ** 2
+        self.alpha_bar = (f[1:] / f[0]).clamp(1e-4, 0.9999).float()
+
+    def _ab(self, t):
+        return self.alpha_bar.to(t.device)[t].view(-1, 1, 1, 1)
+
+    def add_noise(self, x0, t, noise):
+        ab = self._ab(t)
+        return ab.sqrt() * x0 + (1 - ab).sqrt() * noise
+
+    def v_target(self, x0, t, noise):
+        ab = self._ab(t)
+        return ab.sqrt() * noise - (1 - ab).sqrt() * x0
+
+    def to_x0_eps(self, x_t, t, v):
+        ab = self._ab(t)
+        x0 = ab.sqrt() * x_t - (1 - ab).sqrt() * v
+        eps = (1 - ab).sqrt() * x_t + ab.sqrt() * v
+        return x0, eps
+
+    @torch.no_grad()
+    def ddim_sample(self, model, ctx, action, steps=20):
+        B, device = ctx.shape[0], ctx.device
+        x = torch.randn(B, 3, 64, 64, device=device)
+        ts = torch.linspace(self.timesteps - 1, 0, steps).long().to(device)
+        for i, t in enumerate(ts):
+            tb = torch.full((B,), int(t), device=device, dtype=torch.long)
+            v = model(x, ctx, tb, action)
+            x0, eps = self.to_x0_eps(x, tb, v)
+            x0 = x0.clamp(-1, 1)
+            if i < steps - 1:
+                ab_prev = self.alpha_bar.to(device)[ts[i + 1]]
+                x = ab_prev.sqrt() * x0 + (1 - ab_prev).sqrt() * eps
+            else:
+                x = x0
+        return x
