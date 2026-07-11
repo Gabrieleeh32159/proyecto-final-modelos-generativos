@@ -115,7 +115,8 @@ def main():
     p.add_argument("--rollout", type=int, default=0, help="rollout GIF length (0 = off)")
     args = p.parse_args()
 
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = ("cuda" if torch.cuda.is_available()
+              else "mps" if torch.backends.mps.is_available() else "cpu")
     _, val_eps = load_episodes(args.data)
     ds = TransitionDataset(val_eps)
     model = UNet().to(device)

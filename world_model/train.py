@@ -28,7 +28,8 @@ def main():
     p.add_argument("--resume", action="store_true")
     args = p.parse_args()
 
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = ("cuda" if torch.cuda.is_available()
+              else "mps" if torch.backends.mps.is_available() else "cpu")
     train_eps, val_eps = load_episodes(args.data)
     ds = TransitionDataset(train_eps)
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, drop_last=True)
