@@ -4,8 +4,10 @@ Usage:
     python world_model/play.py                  # arranca desde un episodio de validacion
     python world_model/play.py --ddim-steps 5   # mas rapido, algo menos nitido
 
-Teclas: <- izquierda | -> derecha | ^ salto (derecha+salto) | otra = quieto
-        r = reiniciar desde otro episodio | q = salir
+El suenno avanza continuamente (accion "quieto" por defecto); manten presionada
+una tecla para actuar:
+    <- izquierda | -> derecha | ^ salto (derecha+salto)
+    r = reiniciar desde otro episodio | q = salir
 """
 import argparse
 
@@ -47,42 +49,48 @@ def main():
     model.eval()
     diff = Diffusion()
 
-    state = {"ep": 0, "ctx": None, "steps": 0}
+    state = {"ep": 0, "ctx": None, "steps": 0, "action": NOOP}
 
     def reset():
         ep = val_eps[state["ep"] % len(val_eps)]
         state["ep"] += 1
         state["ctx"] = [norm_frame(ep["obs"][0])] * CONTEXT
         state["steps"] = 0
+        state["action"] = NOOP
         im.set_data(to_img(state["ctx"][-1]))
-        ax.set_title("suenna: paso 0 — usa las flechas")
         fig.canvas.draw_idle()
 
-    def on_key(event):
+    def on_press(event):
         if event.key == "q":
             plt.close(fig)
-            return
-        if event.key == "r":
+        elif event.key == "r":
             reset()
-            return
-        action = KEY_TO_ACTION.get(event.key, NOOP)
-        ax.set_title("generando...")
-        fig.canvas.draw()
-        fig.canvas.flush_events()
+        elif event.key in KEY_TO_ACTION:
+            state["action"] = KEY_TO_ACTION[event.key]
+
+    def on_release(event):
+        if KEY_TO_ACTION.get(event.key) == state["action"]:
+            state["action"] = NOOP
+
+    def tick():
         state["ctx"], pred = dream_step(
-            model, diff, state["ctx"], action, device, args.ddim_steps)
+            model, diff, state["ctx"], state["action"], device, args.ddim_steps)
         state["steps"] += 1
         im.set_data(to_img(pred))
-        ax.set_title(f"suenna: paso {state['steps']}  (accion {action})")
+        ax.set_title(f"suenna: paso {state['steps']}  (accion {state['action']})")
         fig.canvas.draw_idle()
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.axis("off")
     im = ax.imshow(torch.zeros(64, 64, 3).numpy())
-    fig.canvas.mpl_connect("key_press_event", on_key)
+    fig.canvas.mpl_connect("key_press_event", on_press)
+    fig.canvas.mpl_connect("key_release_event", on_release)
     reset()
-    print("ventana abierta: flechas para jugar, r reinicia, q sale "
-          f"(~1 frame/s en {device} con ddim {args.ddim_steps})")
+    timer = fig.canvas.new_timer(interval=66)  # corre al ritmo que de la GPU
+    timer.add_callback(tick)
+    timer.start()
+    print("ventana abierta: manten las flechas para actuar, r reinicia, q sale "
+          f"(en {device} con ddim {args.ddim_steps})")
     plt.show()
 
 
