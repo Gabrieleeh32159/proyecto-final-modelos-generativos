@@ -7,11 +7,11 @@ Usage:
 import argparse
 import csv
 import os
-import time
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from wm import EMA, Diffusion, TransitionDataset, UNet, load_episodes
 
@@ -61,13 +61,13 @@ def main():
             tmp,
         )
         os.replace(tmp, ckpt_path)
-        print(f"saved checkpoint at step {step}")
+        tqdm.write(f"saved checkpoint at step {step}")
 
     with open(os.path.join(args.out, "loss.csv"), "a", newline="") as loss_f:
         loss_w = csv.writer(loss_f)
 
         model.train()
-        t0, step0 = time.time(), step
+        pbar = tqdm(total=args.steps, initial=step, unit="step", dynamic_ncols=True)
         while step < args.steps:
             for ctx, action, target in dl:
                 if step >= args.steps:
@@ -84,13 +84,14 @@ def main():
                 opt.step()
                 ema.update(model)
                 step += 1
+                pbar.update(1)
                 if step % args.log_every == 0:
-                    rate = (step - step0) / (time.time() - t0)
-                    print(f"step {step}/{args.steps}  loss {loss.item():.4f}  {rate:.2f} it/s")
+                    pbar.set_postfix(loss=f"{loss.item():.4f}")
                     loss_w.writerow([step, f"{loss.item():.5f}"])
                     loss_f.flush()
                 if step % args.ckpt_every == 0:
                     save()
+        pbar.close()
         save()
 
 
