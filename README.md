@@ -89,6 +89,16 @@ flowchart LR
 | PSNR | **31.44** | 29.95 |
 | SSIM | **0.8903** | 0.7168 |
 
+Muestras en validación — cada fila: 4 frames de contexto, frame real siguiente,
+y 3 muestras independientes del modelo:
+
+![Grid de muestras](assets/samples.png)
+
+Rollout autoregresivo (35 pasos): a la izquierda el juego real, a la derecha el
+modelo soñando alimentándose de sus propias predicciones:
+
+![Rollout real vs sueño](assets/rollout.gif)
+
 El checkpoint entrenado está en la
 [release v1.0](https://github.com/Gabrieleeh32159/proyecto-final-modelos-generativos/releases/tag/v1.0)
 (descargar `latest.pt` a `world_model/checkpoints/`).
