@@ -36,6 +36,42 @@ Código del modelo en [`world_model/wm.py`](world_model/wm.py).
   edge-padding (repetir el primer frame) al inicio de cada episodio.
   Sin augmentation ni resize (los frames ya son 64×64).
 
+## Flujo de entrenamiento
+
+El proceso completo, de juego humano a simulador neuronal:
+
+```mermaid
+flowchart LR
+    A["Gameplay humano<br/>(record.py)"] --> B["Episodios .npz<br/>(frames, acciones)"]
+    B --> C["TransitionDataset<br/>(4 frames ctx, acción, frame t+1)"]
+    C --> D["Entrenamiento DDPM<br/>(train.py)"]
+    D --> E["Checkpoint EMA<br/>(latest.pt)"]
+    E --> F["Evaluación / muestreo DDIM<br/>(eval.py, play.py)"]
+```
+
+1. **Grabación** — `record.py` envuelve el entorno gym3 de procgen: mientras un
+   humano juega, guarda cada transición (frame 64×64 visto *antes* de la acción,
+   acción presionada, reward) en archivos `episode_*.npz` por sesión.
+2. **Carga** — al iniciar el entrenamiento, los ~165k frames se cargan completos
+   a RAM (≈2 GB en uint8) y se indexan como transiciones: contexto = frames
+   `t-3..t` (con edge-padding al inicio del episodio), objetivo = frame `t+1`.
+3. **Paso de entrenamiento** (se repite 25k veces):
+   - se muestrea un batch de transiciones y un timestep aleatorio `t ~ U[0, 1000)`;
+   - se corrompe el frame objetivo con ruido gaussiano según el schedule coseno:
+     `x_t = √ᾱ_t·x_0 + √(1-ᾱ_t)·ε`;
+   - el UNet recibe `x_t` + los 4 frames de contexto + embeddings de timestep y
+     acción, y predice `v = √ᾱ_t·ε − √(1-ᾱ_t)·x_0`;
+   - loss = MSE entre la `v` predicha y la real; backprop con AdamW;
+   - se actualiza una copia EMA de los pesos (decay 0.999), que es la que se
+     usa para evaluar y muestrear (más estable que los pesos crudos).
+4. **Checkpoints** — cada 2000 pasos se guarda `latest.pt` (modelo + EMA +
+   optimizador + paso) con escritura atómica; `--resume` continúa donde quedó,
+   y el loss se registra en `loss.csv` (curva con `plot_loss.py`).
+5. **Inferencia** — para generar un frame se parte de ruido puro y se aplican
+   20 pasos de DDIM: en cada paso el UNet predice `v`, de ahí se reconstruyen
+   `x_0` y `ε`, y se da un paso determinista hacia menos ruido. Encadenando
+   frame a frame (autoregresivo) el modelo "sueña" gameplay completo.
+
 ## Entrenamiento
 
 | | |
